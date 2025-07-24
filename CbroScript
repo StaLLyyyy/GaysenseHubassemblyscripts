@@ -1,0 +1,132 @@
+    local esp_enabled = ui.new_checkbox("Enable Gun Drop ESP")
+    local text_esp_enabled = ui.new_checkbox("Enable Text ESP")
+    local box_esp_enabled = ui.new_checkbox("Enable 3D Box ESP")
+    local box_size_slider = ui.slider_float("Box Size", 1.0, 1.0, 20.0, "%.1f")
+    local update_rate_slider = ui.slider_int("Frametime Update", 1, 1, 10, "%d Frame")
+    local default_color_picker = ui.colorpicker("Default Color", 1.0, 1.0, 1.0, 1.0)
+    local c4_color_picker = ui.colorpicker("C4 Color", 1.0, 0.0, 0.0, 1.0)
+    local grenade_color_picker = ui.colorpicker("Grenade Color", 1.0, 0.6, 0.0, 1.0)
+
+    local BOX_EDGES = {
+        {1, 2}, {1, 3}, {1, 5}, {2, 4}, {2, 6}, {3, 4},
+        {3, 7}, {4, 8}, {5, 6}, {5, 7}, {6, 8}, {7, 8}
+    }
+
+    local render_cache = {}
+    local frame_counter = 0
+
+    local function draw_3d_box(position, box_size, r, g, b, a)
+        local size = Vector3(box_size, box_size, box_size)
+        local half_size = Vector3(size.x / 2, size.y / 2, size.z / 2)
+
+        local corners_world = {
+            Vector3(position.x + half_size.x, position.y + half_size.y, position.z + half_size.z),
+            Vector3(position.x + half_size.x, position.y + half_size.y, position.z - half_size.z),
+            Vector3(position.x + half_size.x, position.y - half_size.y, position.z + half_size.z),
+            Vector3(position.x + half_size.x, position.y - half_size.y, position.z - half_size.z),
+            Vector3(position.x - half_size.x, position.y + half_size.y, position.z + half_size.z),
+            Vector3(position.x - half_size.x, position.y + half_size.y, position.z - half_size.z),
+            Vector3(position.x - half_size.x, position.y - half_size.y, position.z + half_size.z),
+            Vector3(position.x - half_size.x, position.y - half_size.y, position.z - half_size.z)
+        }
+
+        local corners_screen = {}
+        for _, corner in ipairs(corners_world) do
+            local screen_pos = utils.world_to_screen(corner)
+            if not screen_pos then return end
+            table.insert(corners_screen, screen_pos)
+        end
+
+        for _, edge in ipairs(BOX_EDGES) do
+            local p1 = corners_screen[edge[1]]
+            local p2 = corners_screen[edge[2]]
+            render.line(p1.x, p1.y, p2.x, p2.y, r, g, b, a, 1)
+        end
+    end
+
+    cheat.set_callback("paint", function()
+        if not esp_enabled:get() then
+            return
+        end
+
+        local cache_update_rate = update_rate_slider:get()
+        frame_counter = (frame_counter + 1) % cache_update_rate
+
+        if frame_counter == 0 then
+            render_cache = {}
+            
+            local debris_folder = globals.workspace():FindChild("Debris")
+            if not debris_folder then return end
+
+            local camera_pos = camera.GetPosition()
+            local camera_rot = camera.GetRotation()
+            if not camera_pos or not camera_rot then return end
+            
+            local camera_look_vector = Vector3(-camera_rot.m[1][3], -camera_rot.m[2][3], -camera_rot.m[3][3])
+            local items = debris_folder:Children()
+            
+            local c4_color = c4_color_picker:get()
+            local grenade_color = grenade_color_picker:get()
+            local default_color = default_color_picker:get()
+
+            for i, item in ipairs(items) do
+                pcall(function()
+                    if not item or not item.Parent then return end
+
+                    local class_name = item:ClassName()
+                    if class_name == "Part" or class_name == "MeshPart" then
+                        local primitive = item:Primitive()
+                        if not primitive then return end
+                        
+                        local world_position = primitive:GetPartPosition()
+                        if not world_position then return end
+
+                        local to_object_vector = Vector3(world_position.x - camera_pos.x, world_position.y - camera_pos.y, world_position.z - camera_pos.z)
+                        local dot_product = (camera_look_vector.x * to_object_vector.x) + (camera_look_vector.y * to_object_vector.y) + (camera_look_vector.z * to_object_vector.z)
+
+                        if dot_product > 0 then
+                            local screen_position = utils.world_to_screen(world_position)
+                            if screen_position then
+                                local item_name = item:Name()
+                                local color_source
+                                
+                                if item_name == "C4" then
+                                    color_source = c4_color
+                                elseif item_name == "Model" then
+                                    color_source = grenade_color
+                                else
+                                    color_source = default_color
+                                end
+                                
+                                table.insert(render_cache, {
+                                    name = item_name,
+                                    world_pos = world_position,
+                                    screen_pos = screen_position,
+                                    r = math.floor(color_source.r * 255),
+                                    g = math.floor(color_source.g * 255),
+                                    b = math.floor(color_source.b * 255),
+                                    a = math.floor(color_source.a * 255)
+                                })
+                            end
+                        end
+                    end
+                end)
+            end
+        end
+
+        local is_text_enabled = text_esp_enabled:get()
+        local is_box_enabled = box_esp_enabled:get()
+        local current_box_size = box_size_slider:get()
+
+        for _, data in ipairs(render_cache) do
+            if is_text_enabled then
+                local text_size = render.measure_text(data.name, 2)
+                local centered_x = data.screen_pos.x - (text_size.x / 2)
+                render.text(centered_x, data.screen_pos.y, data.name, data.r, data.g, data.b, data.a, "o", 2)
+            end
+
+            if is_box_enabled then
+                draw_3d_box(data.world_pos, current_box_size, data.r, data.g, data.b, data.a)
+            end
+        end
+    end)
