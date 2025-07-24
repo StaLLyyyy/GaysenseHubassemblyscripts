@@ -1,0 +1,345 @@
+local main_enabled = ui.new_checkbox("Enable Zombie Script")
+
+ui.label("--- Aimbot ---")
+local aimbot_enabled = ui.new_checkbox("Enable Aimbot")
+local aimbot_key = ui.keybind("Aimbot Key")
+local aimbot_mode = ui.new_combo("Aimbot Mode", {"Slippery", "Default"})
+local aimbot_fov = ui.slider_int("Aimbot FOV", 150, 10, 500, "%d")
+local dynamic_aimbot_fov_enabled = ui.new_checkbox("Enable Dynamic Aimbot FOV")
+local aimbot_smoothing = ui.slider_float("Aimbot Smoothing", 8.0, 1.0, 20.0, "%.1f")
+local aimbot_target_bone = ui.new_combo("Aimbot Target", {"Head", "HumanoidRootPart"})
+local aimbot_target_method = ui.new_combo("Aimbot Method", {"From Center", "From Cursor"})
+local aimbot_draw_fov = ui.new_checkbox("Draw FOV")
+
+ui.label("--- ESP ---")
+local skeleton_esp_enabled = ui.new_checkbox("Enable Skeleton ESP")
+local skeleton_health_based = ui.new_checkbox("Health-based Color")
+local skeleton_color_picker = ui.colorpicker("Skeleton Color", 1.0, 0.0, 0.0, 1.0)
+local skeleton_outline_enabled = ui.new_checkbox("Enable Skeleton Outline")
+local skeleton_outline_color_picker = ui.colorpicker("Skeleton Outline Color", 0.0, 0.0, 0.0, 1.0) -- Default to Black
+local skeleton_outline_thickness_slider = ui.slider_int("Skeleton Outline Thickness", 3, 1, 5, "%d")
+
+ui.label("--- Mystery Box ESP ---")
+local mystery_box_esp_enabled = ui.new_checkbox("Enable Mystery Box ESP")
+local mystery_box_color_picker = ui.colorpicker("Mystery Box Color", 1.0, 1.0, 0.0, 1.0)
+
+local function sub_vec2(v1, v2) return Vector2(v1.x - v2.x, v1.y - v2.y) end
+local function len_vec2(v) return math.sqrt(v.x^2 + v.y^2) end
+local function div_vec2_scalar(v, s) if s == 0 then return Vector2(0, 0) end return Vector2(v.x / s, v.y / s) end
+local function round(n) return n >= 0 and math.floor(n + 0.5) or math.ceil(n - 0.5) end
+
+local function is_on_screen(screen_pos, screen_size, margin)
+    margin = margin or 50
+    return screen_pos.x >= -margin and screen_pos.x <= screen_size.x + margin and
+           screen_pos.y >= -margin and screen_pos.y <= screen_size.y + margin
+end
+
+local cached_zombies = {}
+local cached_mystery_boxes = {}
+local last_full_scan_time = 0
+local locked_target = nil
+
+local function update_zombie_cache()
+    local baddies_folder = globals.workspace():FindChild("Baddies")
+    if not baddies_folder then return end
+
+    local current_zombies = {}
+    local connections_r6 = {{"Head","Torso"},{"Torso","HumanoidRootPart"},{"Torso","Left Arm"},{"Torso","Right Arm"},{"HumanoidRootPart","Left Leg"},{"HumanoidRootPart","Right Leg"}}
+
+    for _, zombie_model in ipairs(baddies_folder:Children()) do
+        if zombie_model:ClassName() == "Model" then
+            local humanoid = zombie_model:FindChild("Humanoid")
+            if humanoid and humanoid:Health() > 0 then
+                local parts = {}
+                for _, pair in ipairs(connections_r6) do
+                    for _, part_name in ipairs(pair) do
+                        if not parts[part_name] then
+                            parts[part_name] = zombie_model:FindChild(part_name)
+                        end
+                    end
+                end
+                current_zombies[zombie_model] = {humanoid = humanoid, parts = parts}
+            end
+        end
+    end
+    cached_zombies = current_zombies
+end
+
+local function update_mystery_box_cache()
+    local interact_folder = globals.workspace():FindChild("Interact")
+    if not interact_folder then
+        return
+    end
+
+    local current_mystery_boxes = {}
+    for _, child in ipairs(interact_folder:Children()) do
+        if child:ClassName() == "Model" and child:Name() == "MysteryBox" then
+            local main_part = child:FindChild("MainPart")
+            if main_part and main_part:ClassName() == "Part" then
+                table.insert(current_mystery_boxes, main_part)
+            end
+        end
+    end
+    cached_mystery_boxes = current_mystery_boxes
+end
+
+local function draw_skeleton(zombie_parts, color, outline_color, outline_thickness, skeleton_outline_enabled_val)
+    local connections_r6 = {{"Head","Torso"},{"Torso","HumanoidRootPart"},{"Torso","Left Arm"},{"Torso","Right Arm"},{"HumanoidRootPart","Left Leg"},{"HumanoidRootPart","Right Leg"}}
+    local screen_size = render.screen_size()
+
+    for _, pair in ipairs(connections_r6) do
+        local part1 = zombie_parts[pair[1]]
+        local part2 = zombie_parts[pair[2]]
+        if part1 and part2 then
+            local prim1 = part1:Primitive()
+            local prim2 = part2:Primitive()
+            if prim1 and prim2 then
+                local p1_3d = prim1:GetPartPosition()
+                local p2_3d = prim2:GetPartPosition()
+                
+                if p1_3d and p2_3d then
+                    local p1_2d = utils.world_to_screen(p1_3d)
+                    local p2_2d = utils.world_to_screen(p2_3d)
+                    
+                    -- Only draw if both points are reasonably on screen to avoid lines stretching from off-screen
+                    if p1_2d and p2_2d and is_on_screen(p1_2d, screen_size) and is_on_screen(p2_2d, screen_size) then
+                        if skeleton_outline_enabled_val then
+                            render.line(p1_2d.x, p1_2d.y, p2_2d.x, p2_2d.y, outline_color.r, outline_color.g, outline_color.b, outline_color.a, outline_thickness)
+                        end
+                        render.line(p1_2d.x, p1_2d.y, p2_2d.x, p2_2d.y, color.r, color.g, color.b, color.a, 1)
+                    end
+                end
+            end
+        end
+    end
+end
+
+local function draw_mystery_boxes(color)
+    if #cached_mystery_boxes == 0 then
+        return
+    end
+    for _, mb_part in ipairs(cached_mystery_boxes) do
+        local prim = mb_part:Primitive()
+        if prim then
+            local pos_3d = prim:GetPartPosition()
+            if pos_3d then
+                local screen_pos = utils.world_to_screen(pos_3d)
+                if screen_pos then
+                    local text_to_draw = "Mystery Box"
+                    local text_size = render.measure_text(text_to_draw, 2)
+                    local text_x = screen_pos.x - text_size.x / 2
+                    local text_y = screen_pos.y - text_size.y / 2 - 20
+
+                    render.text(text_x, text_y, text_to_draw, color.r, color.g, color.b, color.a, "os", 2)
+                end
+            end
+        end
+    end
+end
+
+local function run_aimbot(valid_zombies)
+    local base_fov_from_ui = aimbot_fov:get()
+    local current_camera_fov = camera.GetFov()
+    local screen_center = div_vec2_scalar(render.screen_size(), 2)
+
+    local actual_fov_for_aimbot = base_fov_from_ui
+
+    if dynamic_aimbot_fov_enabled:get() then
+        local reference_unzoomed_fov = 70.0 
+        local scaling_factor = reference_unzoomed_fov / current_camera_fov
+        
+        actual_fov_for_aimbot = base_fov_from_ui * scaling_factor
+        actual_fov_for_aimbot = math.min(actual_fov_for_aimbot, base_fov_from_ui * 2)
+        actual_fov_for_aimbot = math.max(10, actual_fov_for_aimbot)
+    end
+
+    local fov_size = actual_fov_for_aimbot
+    
+    local check_origin_2d
+    local target_method = aimbot_target_method:get()
+
+    if target_method == 0 then
+        check_origin_2d = screen_center
+    else
+        check_origin_2d = input.cursor_position()
+    end
+
+    if aimbot_draw_fov:get() then
+        render.circle_outline(check_origin_2d.x, check_origin_2d.y, fov_size, 255, 255, 255, 100, 1, 64)
+    end
+
+    if not (aimbot_enabled:get() and aimbot_key:get()) then
+        locked_target = nil
+        return
+    end
+
+    local is_target_still_valid = false
+    if locked_target then
+        for _, zombie_data in ipairs(valid_zombies) do
+            if zombie_data == locked_target then
+                is_target_still_valid = true
+                break
+            end
+        end
+    end
+
+    if not is_target_still_valid then
+        locked_target = nil
+    end
+
+    if not locked_target then
+        local closest_dist = math.huge
+        local target_bone_names = {"Head", "HumanoidRootPart"}
+        local selected_bone_name = target_bone_names[aimbot_target_bone:get() + 1]
+
+        for _, zombie_data in ipairs(valid_zombies) do
+            local target_part = zombie_data.parts[selected_bone_name]
+            if target_part then
+                local prim = target_part:Primitive()
+                if prim then
+                    local bone_pos_3d = prim:GetPartPosition()
+                    if bone_pos_3d then
+                        local bone_pos_2d = utils.world_to_screen(bone_pos_3d)
+                        if bone_pos_2d then
+                            local dist_from_check_point = len_vec2(sub_vec2(bone_pos_2d, check_origin_2d))
+
+                            if dist_from_check_point < fov_size then
+                                local current_dist = dist_from_check_point
+                                if current_dist < closest_dist then
+                                    closest_dist = current_dist
+                                    locked_target = zombie_data
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    if locked_target then
+        local target_bone_names = {"Head", "HumanoidRootPart"}
+        local selected_bone_name = target_bone_names[aimbot_target_bone:get() + 1]
+        local target_part = locked_target.parts[selected_bone_name]
+        if target_part then
+            local prim = target_part:Primitive()
+            if prim then
+                local bone_pos_3d = prim:GetPartPosition()
+                if bone_pos_3d then
+                    local target_pos_2d = utils.world_to_screen(bone_pos_3d)
+                    if target_pos_2d then
+                        local dist_to_target_from_check_origin = len_vec2(sub_vec2(target_pos_2d, check_origin_2d))
+                        if aimbot_mode:get() == 1 and dist_to_target_from_check_origin > fov_size then
+                            locked_target = nil
+                            return
+                        end
+                        
+                        local smoothing = aimbot_smoothing:get()
+                        local move_delta_vec = sub_vec2(target_pos_2d, input.cursor_position())
+                        local move_delta = div_vec2_scalar(move_delta_vec, smoothing)
+                        input.move(round(move_delta.x), round(move_delta.y))
+                    else
+                        locked_target = nil
+                    end
+                end
+            end
+        end
+    end
+end
+
+cheat.set_callback("paint", function()
+    if not main_enabled:get() then return end
+
+    -- Update caches periodically
+    if globals.curtime() - last_full_scan_time > 1.0 then
+        update_zombie_cache()
+        update_mystery_box_cache()
+        last_full_scan_time = globals.curtime()
+    end
+
+    local valid_zombies_this_frame = {}
+    local screen_size = render.screen_size()
+
+    for zombie_model, zombie_data in pairs(cached_zombies) do
+        if zombie_data.humanoid and zombie_data.humanoid:Health() > 0 then
+            local min_x, min_y = math.huge, math.huge
+            local max_x, max_y = -math.huge, -math.huge
+            local has_points = false
+            for _, part in pairs(zombie_data.parts) do
+                if part then
+                    local prim = part:Primitive()
+                    if prim then
+                        local pos_3d = prim:GetPartPosition()
+                        if pos_3d then
+                            local screen_pos = utils.world_to_screen(pos_3d)
+                            if screen_pos then
+                                min_x = math.min(min_x, screen_pos.x)
+                                min_y = math.min(min_y, screen_pos.y)
+                                max_x = math.max(max_x, screen_pos.x)
+                                max_y = math.max(max_y, screen_pos.y)
+                                has_points = true
+                            end
+                        end
+                    end
+                end
+            end
+            if has_points then
+                local width = max_x - min_x
+                local height = max_y - min_y
+                if width > 0 and height > 0 and width < screen_size.x * 0.5 and height < screen_size.y * 0.9 then
+                    zombie_data.bbox = {x = min_x, y = min_y, width = width, height = height}
+                else
+                    zombie_data.bbox = nil
+                end
+            else
+                zombie_data.bbox = nil
+            end
+            table.insert(valid_zombies_this_frame, zombie_data)
+        end
+    end
+
+    run_aimbot(valid_zombies_this_frame)
+
+    local skeleton_color = skeleton_color_picker:get()
+    local skeleton_outline_color = skeleton_outline_color_picker:get()
+    local skeleton_outline_thickness = skeleton_outline_thickness_slider:get()
+    local skeleton_outline_enabled_val = skeleton_outline_enabled:get()
+
+    for _, zombie_data in ipairs(valid_zombies_this_frame) do
+        local hrp = zombie_data.parts["HumanoidRootPart"]
+        if hrp then
+            local prim = hrp:Primitive()
+            if prim then
+                local hrp_pos = prim:GetPartPosition()
+                if not hrp_pos or not utils.world_to_screen(hrp_pos) then
+                    goto continue
+                end
+            else
+                goto continue
+            end
+        else
+            goto continue
+        end
+
+        local color_rgba
+        if skeleton_health_based:get() then
+            local health_percent = zombie_data.humanoid:Health() / zombie_data.humanoid:MaxHealth()
+            color_rgba = {r = math.floor(255 * (1 - health_percent)), g = math.floor(255 * health_percent), b = 0, a = 255}
+        else
+            color_rgba = {r = math.floor(skeleton_color.r * 255), g = math.floor(skeleton_color.g * 255), b = math.floor(skeleton_color.b * 255), a = math.floor(skeleton_color.a * 255)}
+        end
+
+        if color_rgba and skeleton_esp_enabled:get() then
+            draw_skeleton(zombie_data.parts, color_rgba, 
+                          {r = math.floor(skeleton_outline_color.r * 255), g = math.floor(skeleton_outline_color.g * 255), b = math.floor(skeleton_outline_color.b * 255), a = math.floor(skeleton_outline_color.a * 255)},
+                          skeleton_outline_thickness,
+                          skeleton_outline_enabled_val)
+        end
+        ::continue::
+    end
+
+    if mystery_box_esp_enabled:get() then
+        local mb_color = mystery_box_color_picker:get()
+        draw_mystery_boxes({r = math.floor(mb_color.r * 255), g = math.floor(mb_color.g * 255), b = math.floor(mb_color.b * 255), a = math.floor(mb_color.a * 255)})
+    end
+end)
