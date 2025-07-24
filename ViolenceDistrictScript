@@ -1,0 +1,166 @@
+local pallet_cache = {}
+local generator_cache = {}
+
+function find_parts_recursively(parent, model_name_check, part_name, class_name, cache_table)
+    if not parent or not parent:Children() then
+        return
+    end
+
+    for _, child in ipairs(parent:Children()) do
+        if child then
+            if child:ClassName() == "Model" and model_name_check(child:Name()) then
+                local part = child:FindChild(part_name)
+                if part and part:ClassName() == class_name then
+                    table.insert(cache_table, part)
+                end
+            end
+            
+            if #child:Children() > 0 then
+                find_parts_recursively(child, model_name_check, part_name, class_name, cache_table)
+            end
+        end
+    end
+end
+
+function update_pallet_cache()
+    pallet_cache = {}
+    local mapFolder = globals.workspace():FindChild("Map")
+    if not mapFolder then 
+        return 
+    end
+    
+    find_parts_recursively(mapFolder, function(name) return name == "Palletwrong" or name == "palletalien" end, "Primary1", "MeshPart", pallet_cache)
+end
+
+function update_generator_cache()
+    generator_cache = {}
+    local mapFolder = globals.workspace():FindChild("Map")
+    if not mapFolder then return end
+
+    find_parts_recursively(mapFolder, function(name) return name == "Generator" end, "defaultMaterial", "MeshPart", generator_cache)
+end
+
+local options = {
+    pallet_enabled = ui.new_checkbox("Enable Pallet ESP"),
+    pallet_color = ui.colorpicker("Pallet ESP Color", 1.0, 1.0, 0.0, 1.0),
+    pallet_thickness = ui.slider_float("Pallet Line Thickness", 1.0, 1.0, 5.0, "%.1f"),
+
+    separator = ui.label(""),
+
+    gen_enabled = ui.new_checkbox("Enable Generator ESP"),
+    gen_color = ui.colorpicker("Generator ESP Color", 1.0, 0.5, 0.0, 1.0), -- Orange
+    gen_thickness = ui.slider_float("Generator Line Thickness", 1.0, 1.0, 5.0, "%.1f")
+}
+
+function draw_3d_box(part, r, g, b, a, thickness, name)
+    local primitive = part:Primitive()
+    if not primitive then return end
+    
+    local original_center_pos = primitive:GetPartPosition()
+    if not original_center_pos then return end
+
+    local center_pos = original_center_pos
+
+    local width_x, height_y, depth_z
+    
+    if name == "Pallet" then
+        width_x = 5.5
+        height_y = 6.8
+        depth_z = 1.4
+        center_pos = Vector3(original_center_pos.x, original_center_pos.y - 0.7, original_center_pos.z)
+    elseif name == "Generator" then
+        width_x = 7.2
+        height_y = 4.6
+        depth_z = 4.1
+    else
+        width_x, height_y, depth_z = 5, 5, 5
+    end
+
+    local half_width = width_x / 2
+    local half_height = height_y / 2
+    local half_depth = depth_z / 2
+
+    local corners_world = {
+        Vector3(center_pos.x + half_width, center_pos.y + half_height, center_pos.z + half_depth),
+        Vector3(center_pos.x + half_width, center_pos.y + half_height, center_pos.z - half_depth),
+        Vector3(center_pos.x + half_width, center_pos.y - half_height, center_pos.z + half_depth),
+        Vector3(center_pos.x + half_width, center_pos.y - half_height, center_pos.z - half_depth),
+        Vector3(center_pos.x - half_width, center_pos.y + half_height, center_pos.z + half_depth),
+        Vector3(center_pos.x - half_width, center_pos.y + half_height, center_pos.z - half_depth),
+        Vector3(center_pos.x - half_width, center_pos.y - half_height, center_pos.z + half_depth),
+        Vector3(center_pos.x - half_width, center_pos.y - half_height, center_pos.z - half_depth)
+    }
+
+    local screen_points = {}
+    local can_draw = false
+    for i = 1, #corners_world do
+        local screen_pos, _ = utils.world_to_screen(corners_world[i])
+        if screen_pos then
+            screen_points[i] = screen_pos
+            can_draw = true
+        else
+            screen_points[i] = nil
+        end
+    end
+
+    if not can_draw then return end
+
+    local edges = { {1, 2}, {1, 3}, {1, 5}, {2, 4}, {2, 6}, {3, 4}, {3, 7}, {4, 8}, {5, 6}, {5, 7}, {6, 8}, {7, 8} }
+
+    for _, edge in ipairs(edges) do
+        local p1 = screen_points[edge[1]]
+        local p2 = screen_points[edge[2]]
+        if p1 and p2 then
+            render.line(p1.x, p1.y, p2.x, p2.y, r, g, b, a, thickness)
+        end
+    end
+    
+    local min_x, max_x, top_y = math.huge, -math.huge, math.huge
+    local text_pos_found = false
+    for _, pos in pairs(screen_points) do
+        if pos then
+            min_x = math.min(min_x, pos.x)
+            max_x = math.max(max_x, pos.x)
+            top_y = math.min(top_y, pos.y)
+            text_pos_found = true
+        end
+    end
+
+    if text_pos_found then
+        local textSize = render.measure_text(name, 0)
+        local center_x = min_x + (max_x - min_x) / 2
+        render.text(center_x - textSize.x / 2, top_y - textSize.y - 5, name, 255, 255, 255, 255, 'os', 0)
+    end
+end
+
+cheat.set_callback("paint", function()
+    if options.pallet_enabled:get() and #pallet_cache > 0 then
+        local color = options.pallet_color:get()
+        local r, g, b, a = math.floor(color.r * 255), math.floor(color.g * 255), math.floor(color.b * 255), math.floor(color.a * 255)
+        for _, part in ipairs(pallet_cache) do
+            if part and part.Parent then
+                draw_3d_box(part, r, g, b, a, options.pallet_thickness:get(), "Pallet")
+            end
+        end
+    end
+
+    if options.gen_enabled:get() and #generator_cache > 0 then
+        local color = options.gen_color:get()
+        local r, g, b, a = math.floor(color.r * 255), math.floor(color.g * 255), math.floor(color.b * 255), math.floor(color.a * 255)
+        for _, part in ipairs(generator_cache) do
+            if part and part.Parent then
+                draw_3d_box(part, r, g, b, a, options.gen_thickness:get(), "Generator")
+            end
+        end
+    end
+end)
+
+function update_all_caches()
+    update_pallet_cache()
+    update_generator_cache()
+end
+
+update_all_caches()
+
+cheat.set_callback("update_cache", update_all_caches)
+cheat.set_callback("rescan", update_all_caches)
